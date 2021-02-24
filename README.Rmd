@@ -140,7 +140,7 @@ snowRaw <- list(crds = coordinates(snowR)[rInd,], dates = dates, snow = snowM)
 ```
 
 ```{r, include=FALSE}
-load("Results/snowRaw_4km_2004_2020.RData")
+load("results/snowRaw_4km_2004_2020.RData")
 ```
 
 4. Define (a) asymmetric gaussian model, (b) log-likelihood function and (c) function that calculates the dates for specified thresholds in the model prediction.
@@ -242,7 +242,7 @@ smM <- abind::abind(parallel::mclapply(1:nrow(snowRaw$crds), function(j) {
 }, mc.cores = parallel::detectCores()-1), along = 1)
 
 snow <- list(crds = snowRaw$crds, smM = smM)
-# save(snow, file = "results/snowMelt_4km.RData")
+save(snow, file = "results/snowMelt_4km.RData")
 ```
 
 ```{r, include = FALSE}
