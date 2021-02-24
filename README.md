@@ -17,26 +17,21 @@ pre {
 In Arctic-breeding shorebirds, timing of breeding closely follows the
 retreat of snow-cover from tundra nest sites in the spring. We compared
 two indices of breeding phenology (timing of snowmelt and spring
-‘green-up’), summarized separately for two regions (North, South) of
-the Alaska breeding range (Figure 1) of bar-tailed godwits. We did this
-for two temporal periods: long-term trends encompassing the entire study
+‘green-up’), summarized separately for two regions (North, South) of the
+Alaska breeding range (Figure 1) of bar-tailed godwits. We did this for
+two temporal periods: long-term trends encompassing the entire study
 period (2008–2020), and a shorter term related directly to the period in
 which we tracked individuals with geolocators (2008–2014).
 
 <center>
-
 <img src="images/Fig01_breedingRange.png"></img>
-
 <figcaption>
-
 Figure 1: Breeding range of Bar-tailed godwits in Alaska. Map data from
 Natural Earth <https://www.naturalearthdata.com/>. Breeding range
 supplied by BirdLife International and Handbook of the Birds of the
 World (2017) Bird species distribution maps of the world. Version 7.0.
 Available at <http://datazone.birdlife.org/species/requestdis>
-
 </figcaption>
-
 </center>
 
 ## The Datasets
@@ -50,20 +45,16 @@ National Snow & Ice Data Center \[1\].
 1.  List all available downloaded IMS scenes (paths to files) and
     extract dates.
 
-<!-- end list -->
-
 ``` r
 ## list all downloaded IMS ASCI files
-fls.gz <- list.files("~/IMS/4km", pattern = ".gz", recursive = T,  full.names = T)
+fls.gz <- list.files("~/Desktop/4km", pattern = ".gz", recursive = T,  full.names = T)
 
 ## get dates for ASCI files
 dates  <- as.Date(as.POSIXct(unlist(lapply(strsplit(fls.gz, "ims"), function(x) {
   strsplit(x[[2]], "_4km")}))[c(TRUE, FALSE)], format = "%Y%j"))
 ```
 
-2.  Initialize the file structure (projection, raster indices)
-
-<!-- end list -->
+1.  Initialize the file structure (projection, raster indices)
 
 ``` r
 prj <- "+proj=stere +lat_0=90 +lat_ts=60 +lon_0=-80 +k=1 +x_0=0 +y_0=0 +a=6378137 +b=6356257 +units=m +no_defs"
@@ -72,7 +63,7 @@ prj <- "+proj=stere +lat_0=90 +lat_ts=60 +lon_0=-80 +k=1 +x_0=0 +y_0=0 +a=637813
 rastID  <- sample(1:length(fls.gz), 1)
 asciDat <- readLines(fls.gz[rastID])
 ## delete non-data
-tab     <- asciDat[-which(unlist(suppressWarnings(lapply(tab0, function(x) is.na(as.numeric(gsub(" ", "", x)))))))]
+tab     <- asciDat[-which(unlist(suppressWarnings(lapply(asciDat, function(x) is.na(as.numeric(gsub(" ", "", x)))))))]
   
   z <- unlist(lapply(tab, function(.line) as.numeric(strsplit(.line, '')[[1]]))) ## snow data to vector
   m <- matrix(z, ncol = 6144, nrow = 6144, byrow = T)[6144:1,]                   ## to matrix (and flip)                         
@@ -98,54 +89,45 @@ rInd <- extract(snowR, as(btg %>% st_transform(prj), "Spatial"), cellnumbers=TRU
 ```
 
 <center>
-
 <img src="images/Fig02_init.png"></img>
-
 <figcaption>
-
 Figure 2: Random IMS scene (green = open land, white = snow covered
 land, grey = ice covered ocean) in the left and breeding range polygon
 with center coordinates of cells that intersect with the breeding range
 on the right (n = 13,442 cells).
-
 </figcaption>
-
 </center>
 
-3.  Create matrix with each pixel that intersects the breeding range in
+1.  Create matrix with each pixel that intersects the breeding range in
     rows and for each scene in columns. Change `mclapply` to `lapply`
     (and delete the `mc.cores` option) on systems running windows.
 
-<!-- end list -->
-
 ``` r
-snowM <- do.call("cbind", parallel::mclapply(1:length(dates), function(x) {  
+snowM <- do.call("cbind", lapply(1:length(dates), function(x) {  
     
-    tmp <- suppressWarnings(readLines(fls.gz[x]))
-    ind  <- tmp[-which(unlist(suppressWarnings(lapply(tab0, function(x) is.na(as.numeric(gsub(" ", "", x)))))))]
+    tmp <- readLines(fls.gz[x])
+    tab <- tmp[-which(unlist(suppressWarnings(parallel::mclapply(tmp, function(x) is.na(as.numeric(gsub(" ", "", x))), mc.cores = parallel::detectCores()-1))))]
     
-    z <- unlist(lapply(tab, function(.line) as.numeric(strsplit(.line, '')[[1]])))
-    m <- matrix(z, ncol = 6144, nrow = 6144, byrow = T)[6144:1,]  
+    z <- unlist(parallel::mclapply(tab, function(.line) as.numeric(strsplit(.line, '')[[1]]), mc.cores = parallel::detectCores()-1))
+    m <- matrix(z, ncol = 6144, nrow = 6144, byrow = T)[6144:1,] 
     
     raster(m)[][rInd]
     
-}, mc.cores = parallel::detectCores()-1))
+}))
   
-# snowRaw <- list(crds = coordinates(snowR)[rInd], dates = dates, snow = snowM)
+snowRaw <- list(crds = coordinates(snowR)[rInd,], dates = dates, snow = snowM)
 save(snowRaw, file = "results/snowRaw_4km_2004_2020.RData")
 ```
 
-4.  Define (1) asymmetric gaussian model, (2) log-likelihood function
-    and (3) function that calculates the dates for specified thresholds
+1.  Define (a) asymmetric gaussian model, (b) log-likelihood function
+    and (c) function that calculates the dates for specified thresholds
     in the model prediction.
-
-<!-- end list -->
 
 ``` r
 library(bbmle)
 library(zoo)
 
-### 1. assymetric gaussian model
+### a. assymetric gaussian model
 gauss.curve <- function(parms, tab) {
   t <- 1:nrow(tab)
   parms <- as.list(parms)
@@ -154,7 +136,7 @@ gauss.curve <- function(parms, tab) {
   c(fit1, fit2[-1])
 }
 
-### 2. log-likelihood function with binomial error distribution.
+### b. log-likelihood function with binomial error distribution.
 fitGauss <- function(tab) {
   gauss.loglik <- function(a1, a2, a3, a4, a5) {
     fit <- gauss.curve(parms = list(a1=a1, a2=a2, a3=a3, a4=a4, a5=a5), tab)  
@@ -171,7 +153,7 @@ fitGauss <- function(tab) {
   coef(mle)
 } 
 
-### 3. Curve intersection
+### c. Curve intersection
 curveIntersect <- function(curve1, curve2, empirical=TRUE, domain=NULL) {
 
   curve1_f <- approxfun(curve1$x, curve1$y, rule = 2)
@@ -186,11 +168,64 @@ curveIntersect <- function(curve1, curve2, empirical=TRUE, domain=NULL) {
 } 
 ```
 
-7.  Fit asymmetric gaussian model and extract date of 1/3 snow (model
+1.  Fit asymmetric gaussian model and extract date of 1/3 snow (model
     prediction intersects falls below 66.66) free per pixel and year. In
     addition dates will be extracted when the pixel was snow free for
     the first time in each year and the first date when the pixel
     remained snow free for at least 60 days.
+
+``` r
+smM <- do.call("rbind", parallel::mclapply(1:nrow(snowRaw$crds), function(j) {
+
+  ## only interested in snow free land vs. snow covered land (different years have different values e.g. 4 or 165 for snow free)
+  y <- ifelse(snowRaw$snow[j,]%in%c(4,165), 4, ifelse(snowRaw$snow[j,]%in%c(3,164), 3, snowRaw$snow[j,]))
+
+  if(sum(!y%in%c(2,4)) < length(y)/5) {
+
+    tab0 <- data.frame(year = as.numeric(format(snowRaw$dates, "%Y")),
+                       s    = ifelse(y%in%c(0,1), 0, ifelse(y==2, 0, 1)),
+                       doy =  as.numeric(format(snowRaw$dates, "%j")))
+
+    ## split by year
+    spl <- split(tab0, f = as.character(tab0$year))
+
+    sm1 <- do.call("rbind", lapply(spl, function(x) {
+      
+      tab <- merge(data.frame(day = 1:365), data.frame(day = as.numeric(x[,3]), p = as.numeric(x[,2])), all.x = T)
+
+      mle <- fitGauss(tab)
+      fit <- gauss.curve(mle, tab)
+
+      sm <- tryCatch(curveIntersect(data.frame(x = tab[,1], y = fit)[1:mle[1],], data.frame(x = tab[,1], y = 0.666))$x,
+                     error = function(x) NA)
+      
+      open0 <- sapply(which(tab$p<0.5), function(s) {
+
+        if(any(!is.na(tab$p[s:nrow(tab)]) & tab$p[s:nrow(tab)]>0.5)) {
+          nextSnow <- min(which(tab$p[s:nrow(tab)]>0.5))+s
+        } else nextSnow <- nrow(tab)
+        
+        diff(c(s, nextSnow))
+
+      })
+      
+      cbind(year = median(as.numeric(as.numeric(as.character(x[,1])))), sm = sm, 
+            first = min(tab$day[which(tab$p<0.5)]), 
+            open  = tab$day[which(tab$p<0.5)[min(which(open0>=60))]])
+
+    }))
+
+    matrix(unlist(c(merge(data.frame(year = 2004:2020), sm1, all.x = T)[,-1])), ncol = 3)
+
+  } else {
+    matrix(NA, nrow = length(2004:2020), ncol = 3)
+  }
+
+}, mc.cores = parallel::detectCores()-1))
+
+snow <- list(crds = snowRaw$crds, smM = smM)
+save(snow, file = "results/snowMelt_4km.RData")
+```
 
 ### Noise-removed NDVI from NOAA STAR
 
