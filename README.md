@@ -1,16 +1,3 @@
-<style type="text/css">
-
-body, td {
-   font-size: 17px;
-}
-code.r{
-  font-size: 12px;
-}
-pre {
-  font-size: 12px
-}
-</style>
-
 ## Conklin, Lisovski & Battley 2021 - Environmental data and analysis
 
 In Arctic-breeding shorebirds, timing of breeding closely follows the
