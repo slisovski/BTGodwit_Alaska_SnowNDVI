@@ -8,19 +8,6 @@ editor_options:
   chunk_output_type: console
 ---
 
-<style type="text/css">
-
-body, td {
-   font-size: 17px;
-}
-code.r{
-  font-size: 12px;
-}
-pre {
-  font-size: 12px
-}
-</style>
-
 
 ## Conklin, Lisovski & Battley 2021 - Environmental data and analysis
 
@@ -71,10 +58,9 @@ Remotely sensed IMS Daily Northern Hemisphere Snow and Ice Analysis data for the
 
 1. List all available downloaded IMS scenes (paths to files) and extract dates.
 
-
 ```{r snow1, eval = FALSE}
 ## list all downloaded IMS ASCI files
-fls.gz <- list.files("~/Desktop/4km", pattern = ".gz", recursive = T,  full.names = T)
+fls.gz <- list.files("~/4km", pattern = ".gz", recursive = T,  full.names = T)
 
 ## get dates for ASCI files
 dates  <- as.Date(as.POSIXct(unlist(lapply(strsplit(fls.gz, "ims"), function(x) {
@@ -250,43 +236,204 @@ load("results/snowMelt_4km.RData")
 ```
 
 
-```{r}
+```{r, include = FALSE, eval = FALSE}
+library(nlme)
+library(lmerTest)
+library(lme4)
+library(merTools)
+library(mgcv)
+library(glue)
+
 crds <- rgdal:::project(snow$crds, prj, inv = T)
-ind  <- matrix(c(crds[,2]<90, crds[,2]>64, crds[,2]<=64), nrow = 3)
+ind  <- matrix(c(crds[,2]<90, crds[,2]>64, crds[,2]<=64), nrow = 3, byrow = TRUE)
+
+### 2008 - 2020
 
 snowTrend <- lapply(1:3, function(l)
   apply(snow$smM[ind[l,],which(2004:2020>=2008),l], 2, function(x) {
     quantile(x, probs = c(0.025, 0.5, 0.975), na.rm = T)
   }))
 
-snowStats <- lapply(1:3, function(l) {
-  tmp <- data.frame(year = rep(2008:2020, each = sum(ind[l,])), 
-                    snow = c(snow$smM[ind[l,],which(2004:2020>=2008),l]),
-                    cell = rep(which(ind[l,]), length(2008:2020)))
-  
-  
-  
+snowStats <- do.call("cbind",lapply(1:3, function(l) {
+  do.call("rbind", lapply(1:3, function(t) {
+      tmp <- data.frame(year = rep(2008:2020, each = sum(ind[l,])), 
+                        snow = c(snow$smM[ind[l,],which(2004:2020>=2008),t]),
+                        cell = rep(which(ind[l,]), length(2008:2020)))
+      tmp <- subset(tmp, !is.na(snow) & !is.nan(snow) & !is.infinite(snow))
+      
+      lm <- lmer(snow ~ year + (1|cell), data = tmp, na.action = na.omit)
+    
+      nsim <- 2000
+      bsim <- arm::sim(lm, n.sim = nsim)
+    
+      out <- c(Median = round(summary(lm)$coefficients[2,1], 3), suppressMessages(confint(lm, parm = "year")), se = sd(bsim@fixef[,2])/sqrt(length(bsim@fixef[,2])))
+      if(l==1) {
+        glue("{round(out[1],3)} d/yr ± SE {round(out[4],4)}; (95% Cl, {round(out[2],3)}, {round(out[3],3)})")
+      } else {
+                glue("{round(out[1],3)} ± {round(out[4],4)}; ({round(out[2],3)}, {round(out[3],3)})")
+      }
+  }))
+  }))
+
+rownames(snowStats) <- c("Gaussian fit", "First doy", "Free doy")
+colnames(snowStats) <- c("Breeding area", "Northern subset", "Southern subset")
+
+
+### 2008-2014
+
+snowTrend2 <- lapply(1:3, function(l)
+  apply(snow$smM[ind[l,],which(2004:2020>=2008 & 2004:2020<=2014),l], 2, function(x) {
+    quantile(x, probs = c(0.025, 0.5, 0.975), na.rm = T)
+  }))
+
+snowStats2 <- do.call("cbind",lapply(1:3, function(l) {
+  do.call("rbind", lapply(1:3, function(t) {
+      tmp <- data.frame(year = rep(2008:2014, each = sum(ind[l,])), 
+                        snow = c(snow$smM[ind[l,],which(2004:2020>=2008 & 2004:2020<=2014),t]),
+                        cell = rep(which(ind[l,]), length(2008:2014)))
+      tmp <- subset(tmp, !is.na(snow) & !is.nan(snow) & !is.infinite(snow))
+      
+      lm <- lmer(snow ~ year + (1|cell), data = tmp, na.action = na.omit)
+    
+      nsim <- 2000
+      bsim <- arm::sim(lm, n.sim = nsim)
+    
+      out <- c(Median = round(summary(lm)$coefficients[2,1], 3), suppressMessages(confint(lm, parm = "year")), se = sd(bsim@fixef[,2])/sqrt(length(bsim@fixef[,2])))
+      if(l==1) {
+        glue("{round(out[1],3)} d/yr ± SE {round(out[4],4)}; (95% Cl, {round(out[2],3)}, {round(out[3],3)})")
+      } else {
+                glue("{round(out[1],3)} ± {round(out[4],4)}; ({round(out[2],3)}, {round(out[3],3)})")
+      }
+  }))
+  }))
+
+rownames(snowStats2) <- c("Gaussian fit", "First doy", "Free doy")
+colnames(snowStats2) <- c("Breeding area", "Northern subset", "Southern subset")
+
+statList <- list(snowStats, snowStats2)
+save(statList, file = "results/snowStats.rda")
+
+png("images/Fig03_SnowTrends.png", width = 800, height = 350, res = 100)
+opar <- par(mfrow = c(1,3), mar = c(4,4,1,1), oma = c(0,3,0,0))
+invisible(
+  lapply(1:3, function(l) {
+      range <- apply(snow$smM[ind[l,],which(2004:2020>=2008),1], 2, function(x) {
+                     quantile(x, probs = c(0.025, 0.5, 0.975), na.rm = T)})
+      mFirst <- apply(snow$smM[ind[l,],which(2004:2020>=2008),2], 2, median, na.rm = T)
+      mFull  <- apply(snow$smM[ind[l,],which(2004:2020>=2008),3], 2, median, na.rm = T)
+      plot(2008:2020,range[1,], type = "n", ylim = range(range), las = 1, xlab = "", ylab = "")
+      polygon(c(2008:2020, 2020:2008), c(range[1,], rev(range[3,])), col = "grey80", border = NA)
+      lines(2008:2020, range[2,], col = 1, lwd = 3)
+            lines(2008:2020, mFirst, col = 1, lwd = 2, lty = 2)
+                  lines(2008:2020, mFull, col = 1, lwd = 2, lty = 3)
+      
+      tmp <- data.frame(year = rep(2008:2020, each = sum(ind[l,])), 
+                        snow = c(snow$smM[ind[l,],which(2004:2020>=2008),1]),
+                        cell = rep(which(ind[l,]), length(2008:2020)))
+      tmp <- subset(tmp, !is.na(snow) & !is.nan(snow) & !is.infinite(snow))
+      
+      lm <- lmer(snow ~ year + (1|cell), data = tmp, na.action = na.omit)
+      
+      newdat  <- data.frame(year = 2008:2020)
+      mm      <- model.matrix(~year, newdat)
+
+      newdat$y1 <- mm%*%fixef(lm)
+      with(newdat, lines(year, y1, lty = 1, lwd = 2.5, col = "darkblue"))
+      
+      
+      tmp <- data.frame(year = rep(2008:2014, each = sum(ind[l,])), 
+                        snow = c(snow$smM[ind[l,],which(2004:2020>=2008 & 2004:2020<=2014),1]),
+                        cell = rep(which(ind[l,]), length(2008:2014)))
+      tmp <- subset(tmp, !is.na(snow) & !is.nan(snow) & !is.infinite(snow))
+      
+      lm <- lmer(snow ~ year + (1|cell), data = tmp, na.action = na.omit)
+      
+      newdat  <- data.frame(year = 2008:2014)
+      mm      <- model.matrix(~year, newdat)
+
+      newdat$y1 <- mm%*%fixef(lm)
+      with(newdat, lines(year, y1, lty = 1, lwd = 2.5, col = "orange"))
+      
+      mtext(ifelse(l==1, "Breeding range", ifelse(l==2, "Northern subset", "Southern subset")), line =2, cex = 1.4)
+      
+      if(l==1) {
+        legend("bottomleft", lty = c(1,2,3), c("Gaussian fit", "First doy", "Full doy"), cex = 1.3)
+      }
   })
+)
+mtext("Date (doy)", 2, outer = TRUE, cex = 1.3)
+par(opar)
+dev.off()
+```
+
+<center>
+  <img src="images/Fig03_SnowTrends.png"></img>
+  <figcaption>Figure 3: Timing of snowmelt in the Alaskan breeding range and for the northern (>64 degrees North) and southern (below 64 degrees North).</figcaption>
+</center>
 
 
+```{r, include = FALSE}
+load("results/snowStats.rda")
+```
 
+8. Trend statistics for the entire study period (2008-2020) and the tracking period (2008-2014).
 
-plot(2008:2020, comb[1,], type = "n", ylim = range(comb), xlab = "", ylab = "Date (doy)", las = 1)
-polygon(c(2008:2020, 2020:2008), c(combS[1,], rev(combS[3,])), col = "grey80", border = NA)
-lines(2008:2020, combS[2,], col = 1, lwd = 3)
-lines(2008:2020, freeS[2,], col = 1, lwd = 2, lty = 2)
-lines(2008:2020, firstS[2,], col = 1, lwd = 2, lty = 3)
-
+```{r snowTable}
+knitr::kable(statList[[1]])
+knitr::kable(statList[[2]])
 ```
 
 
 ### Noise-removed NDVI from NOAA STAR
+
+Remotely sensed NDVI data for the period 2008–2020 on a scale of 4 x 4 km were downloaded from NOAA STAR Center for Satellite Applications and Research [2]. The used noise reduced NDVI dataset is part of the blended-VHP products that is a re-processed Vegetation Health data set derived from VIIRS (2013-present) and AVHRR (1981-2012) GAC data. It was processed by the newly developed operational VHP system. The new VHP system was improved from GVI-x VH system and some changes/improvement were made to meet the requirement of operation and improve data quality. It can process GAC data from NOAA-19, as well as FRAC data from METOP A and METOP-B. It also produce vegetation health products from VIIRS on NPP and JPSS satellites. VHP system is operationaly running at NOAA Office of Satellite and Product Operations(OSPO) and providing official VHP products. This web site provides recent VH data as a backup/alternative data source. VHP product posted on this VH web site should be consistent to that released by OSPO.
+
+1. List all available downloaded noise reduced NDVI scenes (paths to files) and extract dates.
+
+```{r ndvi1, eval = FALSE}
+## list all downloaded NDVI files
+fls <- list.files("VHP_SM_SMN/", pattern = "SMN.tif$")
+
+strs <- sapply(strsplit(fls, ".", fixed = T), function(x) x[[5]])
+year <- as.numeric(substring(strs, 2, 5))
+week <- as.numeric(substring(strs, 6, 8))
+
+date0 <- cbind(year, week)
+date <- as.Date(as.POSIXct(apply(date0, 1, function(x) {
+  tm <- seq(as.POSIXct(paste0(x[1], "-01-01")), as.POSIXct(paste0(x[1], "-12-31")), by = "day")
+  w  <- which(x[2]==as.numeric(format(tm, "%U")))
+  mean(tm[w])
+}), origin = "1970-01-01")
+
+files <- data.frame(Path = list.files(dwd, pattern = "SMN.tif$", full.names = T), Year = year, Week = week, Date = date)
+files <- subset(files, Year >= 2004)
+files <- files[order(files$Date),]
+```   
+
+2. Extract values for Bar-tailed godwit breeding range in Alaska.
+
+```{r ndvi2, eval = FALSE}
+eviM <- do.call("cbind", pbmclapply(1:nrow(files), function(x) { 
+   r0 <- raster(as.character(files[x,1]))
+   raster::extract(r0, snowRaw$crds)
+}, mc.cores = detectCores()-1))
+
+eviRaw <- list(crds = snow$crds, dates = dates, evi = eviM)
+save(eviRaw, file = "results/eviRaw_4km_2004_2020.RData")
+```  
+
+```{r, include=FALSE}
+load("results/eviRaw_4km_2004_2020.RData")
+```
+
+3. ...
+
 
 
 
 ### References
 
 [1] IMS Daily Northern Hemisphere Snow and Ice Analysis at 1 km, 4 km, and 24 km Resolutions, Version 1. https://doi.org/10.7265/N52R3PMC
-
+[2] https://www.star.nesdis.noaa.gov/smcd/emb/vci/VH/vh_ftp.php
 
 
