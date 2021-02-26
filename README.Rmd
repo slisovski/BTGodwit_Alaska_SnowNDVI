@@ -392,48 +392,260 @@ Remotely sensed NDVI data for the period 2008–2020 on a scale of 4 x 4 km were
 
 ```{r ndvi1, eval = FALSE}
 ## list all downloaded NDVI files
-fls <- list.files("VHP_SM_SMN/", pattern = "SMN.tif$")
+fls <- list.files("/Volumes/bioing/user/slisovsk/VHP_SM_SMN", pattern = "SMN.tif$")
 
 strs <- sapply(strsplit(fls, ".", fixed = T), function(x) x[[5]])
 year <- as.numeric(substring(strs, 2, 5))
 week <- as.numeric(substring(strs, 6, 8))
 
 date0 <- cbind(year, week)
-date <- as.Date(as.POSIXct(apply(date0, 1, function(x) {
+date <-  as.POSIXct(apply(date0, 1, function(x) {
   tm <- seq(as.POSIXct(paste0(x[1], "-01-01")), as.POSIXct(paste0(x[1], "-12-31")), by = "day")
   w  <- which(x[2]==as.numeric(format(tm, "%U")))
   mean(tm[w])
 }), origin = "1970-01-01")
 
 files <- data.frame(Path = list.files(dwd, pattern = "SMN.tif$", full.names = T), Year = year, Week = week, Date = date)
-files <- subset(files, Year >= 2004)
+files <- subset(files, Year >= 2008 & Year <= 2020)
 files <- files[order(files$Date),]
 ```   
 
 2. Extract values for Bar-tailed godwit breeding range in Alaska.
 
 ```{r ndvi2, eval = FALSE}
-eviM <- do.call("cbind", pbmclapply(1:nrow(files), function(x) { 
-   r0 <- raster(as.character(files[x,1]))
-   raster::extract(r0, snowRaw$crds)
-}, mc.cores = detectCores()-1))
+crds <- rgdal:::project(snowRaw$crds, prj, inv = T)
 
-eviRaw <- list(crds = snow$crds, dates = dates, evi = eviM)
-save(eviRaw, file = "results/eviRaw_4km_2004_2020.RData")
+eviM <- do.call("cbind", pbmcapply:::pbmclapply(1:nrow(files), function(x) { 
+   r0 <- raster(as.character(files[x,1]))
+   raster::extract(r0, crds)
+}, mc.cores = parallel::detectCores()-1))
+
+eviRaw <- list(crds = crds, dates = files$Date, evi = eviM)
+save(eviRaw, file = "results/eviRaw_4km_2008_2020.RData")
 ```  
 
 ```{r, include=FALSE}
-load("results/eviRaw_4km_2004_2020.RData")
+load("results/eviRaw_4km_2008_2020.RData")
 ```
 
-3. ...
+3. Snow cover and artifact correction: NDVI values below zero (artifacts) will be removed and snow cover data for each NDVI date and pixel will be extracted.
+
+```{r ndvi3, eval = FALSE}
+## closest snow value for NDVI dates
+snowNDVIindex <- sapply(as.numeric(eviRaw$dates), function(d) which.min(abs(d-as.numeric(as.POSIXct(snowRaw$dates)))))
+
+eviSnow <- abind::abind(parallel::mclapply(1:nrow(eviRaw$evi), function(x) {
+  
+  tmp <- ifelse(eviRaw$evi[x,]<0, NA, eviRaw$evi[x,])
+  
+  snow0 <- ifelse(snowRaw$snow[x,]%in%c(4,165), 4, ifelse(snowRaw$snow[x,]%in%c(3,164), 3, snowRaw$snow[x,]))
+  snow  <- ifelse(snow0%in%c(0,1), 0, ifelse(snow0==2, 0, 1))
+
+  array(c(tmp, snow[snowNDVIindex]), dim = c(1, length(tmp), 2))
+
+}, mc.cores = parallel::detectCores()-1), along = 1)
+```
+
+4. Calculate distance matrix between cells to allow robust loess fits by including cells of the sourrounding weighted by the distance.
+
+```{r, eval = FALSE}
+### distance matrix
+distM <- geosphere::distm(eviRaw$crds)
+```
+
+5. Define functions to identify peaks in time series (after Bolton et al. 2020 [3]).
+
+```{r}
+FindPeaks <- function(x, mag_order = T) {
+  d <- diff(x)
+  d_code <- (d > 0) + (2 * (d < 0))
+  peaks <- unlist(gregexpr("12", paste(d_code, collapse="")))
+  if(peaks[1] == -1) peaks <- NULL
+  flat_peaks <- unlist(gregexpr("10+2", paste(d_code, collapse="")))
+  if(flat_peaks[1] == -1) flat_peaks <- NULL
+  d_code_rle <- rle(d_code)
+  flat_peaks <- flat_peaks + round(d_code_rle$l[match(flat_peaks, cumsum(d_code_rle$l)) + 1] / 2)
+  peaks <- sort(c(peaks + 1, flat_peaks + 1))
+  if(mag_order) return(peaks[order(x[peaks])])
+  return(peaks)
+}
+```
+
+6. Smooth annual NDVI curve per pixel and extract threshold (15% of increasing curve: from snow melt to max. NDVI).
+
+```{r, eval = FALSE}
+eviPhen <- do.call("rbind", parallel::mclapply(1:nrow(eviRaw$evi), function(x) {
+  
+  pxlInd <- which(distM[x,]<15*1000) ## pxls in 15km sourrounding
+  
+  phenOut <- sapply(2008:2020, function(y) {
+    
+    doy <- as.numeric(format(eviRaw$dates[as.numeric(format(eviRaw$dates, "%Y"))==y], "%j"))
+    tmp <- eviSnow[pxlInd,as.numeric(format(eviRaw$dates, "%Y"))==y,]
+    
+    snowP <- apply(tmp[,,2], 2, function(d) sum(d, na.rm = T)/length(d))
+
+    fitTab <- data.frame(dts = rep(doy, each = dim(tmp)[1]), evi = c(tmp[,,1]), 
+                         snow = rep(snowP, each = dim(tmp)[1]), weight = rep(dnorm(distM[x,pxlInd]/1000, 0, 4), dim(tmp)[2]))
+        
+    spl  <- with(subset(fitTab, !is.na(evi)), smooth.spline(x = dts, y = evi, spar = 0.3, w = weight))
+    xSeq <- seq(min(unique(fitTab$dts[fitTab$snow<0.99])), max(unique(fitTab$dts[fitTab$snow<0.99])))
+    ySeg <- predict(spl, data.frame(dts = xSeq))$y$dts
+        
+    max <- FindPeaks(ySeg, mag_order = F)[1]   
+    amp <- diff(range(ySeg[1:max]))
+    thr <- min(ySeg[1:max])+0.15*amp
+    strt <- tryCatch(curveIntersect(data.frame(x = xSeq, y = ySeg)[1:max,], data.frame(x = xSeq, y = thr))$x, error = function(e) NA)
+      
+      # matplot(doy, t(tmp[,,1]), pch = 16, col = "grey90", type = "p", las = 1)
+      # points(fitTab$dts, fitTab$evi, pch = 16, col = ifelse(fitTab$snow>0.99, "transparent", 
+      #        sapply(fitTab$weight*50, function(c) adjustcolor("forestgreen", alpha.f = c))))
+      # lines(xSeq, ySeg, lwd = 4, col = "orange")
+      # points(strt, thr, pch = 22, cex = 2, bg = "orange", lwd = 2)
+      # par(new = T)
+      # plot(doy, seq(0,1, length = length(doy)), type = "n", xlab = "", ylab = "", yaxt = "n")
+      # points(doy, snowP, pch = 16, col = "blue", type = "o")
+    
+   strt
+  }) 
+  
+}, mc.cores = parallel::detectCores()-1))
+
+evi <- list(crds = crds, eviM = eviPhen)
+save(evi, file = "results/eviPhen_4km.RData")
+```
+
+```{r}
+load("results/eviPhen_4km.RData")
+```
+
+```{r, include = FALSE, eval = FALSE}
+crds <- evi$crds
+ind  <- matrix(c(crds[,2]<90, crds[,2]>64, crds[,2]<=64), nrow = 3, byrow = TRUE)
+
+### 2008 - 2020
+
+eviTrend <- lapply(1:3, function(l)
+  apply(evi$eviM[ind[l,],], 2, function(x) {
+    quantile(x, probs = c(0.025, 0.5, 0.975), na.rm = T)
+  }))
+
+eviStats <- do.call("cbind",lapply(1:3, function(l) {
+      tmp <- data.frame(year = rep(2008:2020, each = sum(ind[l,])), 
+                        evi = c(evi$eviM[ind[l,],]),
+                        cell = rep(which(ind[l,]), length(2008:2020)))
+      tmp <- subset(tmp, !is.na(evi) & !is.nan(evi) & !is.infinite(evi))
+      
+      lm <- lmer(evi ~ year + (1|cell), data = tmp, na.action = na.omit)
+    
+      nsim <- 2000
+      bsim <- arm::sim(lm, n.sim = nsim)
+    
+      out <- c(Median = round(summary(lm)$coefficients[2,1], 3), suppressMessages(confint(lm, parm = "year")), se = sd(bsim@fixef[,2])/sqrt(length(bsim@fixef[,2])))
+      glue("{round(out[1],3)} d/yr ± SE {round(out[4],4)}; (95% Cl, {round(out[2],3)}, {round(out[3],3)})")
+  }))
+
+rownames(eviStats) <- c("2008-2020")
+colnames(eviStats) <- c("Breeding area", "Northern subset", "Southern subset")
 
 
+### 2008-2014
+
+eviTrend2 <- lapply(1:3, function(l)
+  apply(evi$eviM[ind[l,],which(2008:2020<=2014)], 2, function(x) {
+    quantile(x, probs = c(0.025, 0.5, 0.975), na.rm = T)
+  }))
+
+eviStats2 <- do.call("cbind",lapply(1:3, function(l) {
+      tmp <- data.frame(year = rep(2008:2014, each = sum(ind[l,])), 
+                        evi = c(evi$eviM[ind[l,],which(2008:2020<=2014)]),
+                        cell = rep(which(ind[l,]), length(2008:2014)))
+      tmp <- subset(tmp, !is.na(evi) & !is.nan(evi) & !is.infinite(evi))
+      
+      lm <- lmer(evi ~ year + (1|cell), data = tmp, na.action = na.omit)
+    
+      nsim <- 2000
+      bsim <- arm::sim(lm, n.sim = nsim)
+    
+      out <- c(Median = round(summary(lm)$coefficients[2,1], 3), suppressMessages(confint(lm, parm = "year")), se = sd(bsim@fixef[,2])/sqrt(length(bsim@fixef[,2])))
+      glue("{round(out[1],3)} d/yr ± SE {round(out[4],4)}; (95% Cl, {round(out[2],3)}, {round(out[3],3)})")
+  }))
+
+rownames(eviStats2) <- c("2008-2014")
+colnames(eviStats2) <- c("Breeding area", "Northern subset", "Southern subset")
+
+eviStats <- rbind(eviStats, eviStats2)
+save(eviStats, file = "results/eviStats.rda")
+
+png("images/Fig04_EviTrends.png", width = 800, height = 350, res = 100)
+opar <- par(mfrow = c(1,3), mar = c(4,4,1,1), oma = c(0,3,0,0))
+invisible(
+  lapply(1:3, function(l) {
+      range <- apply(evi$eviM[ind[l,],], 2, function(x) {
+                     quantile(x, probs = c(0.025, 0.5, 0.975), na.rm = T)})
+
+      plot(2008:2020,range[1,], type = "n", ylim = range(range), las = 1, xlab = "", ylab = "")
+      polygon(c(2008:2020, 2020:2008), c(range[1,], rev(range[3,])), col = "grey80", border = NA)
+      lines(2008:2020, range[2,], col = 1, lwd = 3)
+
+      tmp <- data.frame(year = rep(2008:2020, each = sum(ind[l,])), 
+                        evi = c(evi$eviM[ind[l,],]),
+                        cell = rep(which(ind[l,]), length(2008:2020)))
+      tmp <- subset(tmp, !is.na(evi) & !is.nan(evi) & !is.infinite(evi))
+      
+      lm <- lmer(evi ~ year + (1|cell), data = tmp, na.action = na.omit)
+      
+      newdat  <- data.frame(year = 2008:2020)
+      mm      <- model.matrix(~year, newdat)
+
+      newdat$y1 <- mm%*%fixef(lm)
+      with(newdat, lines(year, y1, lty = 1, lwd = 2.5, col = "darkgreen"))
+      
+      
+      tmp <- data.frame(year = rep(2008:2014, each = sum(ind[l,])), 
+                        evi = c(evi$eviM[ind[l,],which(2008:2020<=2014)]),
+                        cell = rep(which(ind[l,]), length(2008:2014)))
+      tmp <- subset(tmp, !is.na(evi) & !is.nan(evi) & !is.infinite(evi))
+      
+      lm <- lmer(evi ~ year + (1|cell), data = tmp, na.action = na.omit)
+      
+      newdat  <- data.frame(year = 2008:2014)
+      mm      <- model.matrix(~year, newdat)
+
+      newdat$y1 <- mm%*%fixef(lm)
+      with(newdat, lines(year, y1, lty = 1, lwd = 2.5, col = "orange"))
+      
+      mtext(ifelse(l==1, "Breeding range", ifelse(l==2, "Northern subset", "Southern subset")), line =2, cex = 1.4)
+      
+  })
+)
+mtext("Date (doy)", 2, outer = TRUE, cex = 1.3)
+par(opar)
+dev.off()
+```
+
+<center>
+  <img src="images/Fig04_EviTrends.png"></img>
+  <figcaption>Figure 3: Timing of vegetation greenup in the Alaskan breeding range and for the northern (>64 degrees North) and southern (below 64 degrees North).</figcaption>
+</center>
+
+
+```{r, include = FALSE}
+load("results/eviStats.rda")
+```
+
+7. Trend statistics for the entire study period (2008-2020) and the tracking period (2008-2014).
+
+```{r eviTable}
+knitr::kable(eviStats)
+```
 
 
 ### References
 
 [1] IMS Daily Northern Hemisphere Snow and Ice Analysis at 1 km, 4 km, and 24 km Resolutions, Version 1. https://doi.org/10.7265/N52R3PMC
+
 [2] https://www.star.nesdis.noaa.gov/smcd/emb/vci/VH/vh_ftp.php
 
+[3] Douglas K. Bolton, Josh M. Gray, Eli K. Melaas, Minkyu Moon, Lars Eklundh, Mark A. Friedl (2020) Continental-scale land surface phenology from harmonized Landsat 8 and Sentinel-2 imagery. Remote Sensing of Environment, 240, https://doi.org/10.1016/j.rse.2020.111685.
 

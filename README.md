@@ -1,3 +1,4 @@
+
 ## Conklin, Lisovski & Battley 2021 - Environmental data and analysis
 
 In Arctic-breeding shorebirds, timing of breeding closely follows the
@@ -296,21 +297,21 @@ should be consistent to that released by OSPO.
 
 ``` r
 ## list all downloaded NDVI files
-fls <- list.files("VHP_SM_SMN/", pattern = "SMN.tif$")
+fls <- list.files("/Volumes/bioing/user/slisovsk/VHP_SM_SMN", pattern = "SMN.tif$")
 
 strs <- sapply(strsplit(fls, ".", fixed = T), function(x) x[[5]])
 year <- as.numeric(substring(strs, 2, 5))
 week <- as.numeric(substring(strs, 6, 8))
 
 date0 <- cbind(year, week)
-date <- as.Date(as.POSIXct(apply(date0, 1, function(x) {
+date <-  as.POSIXct(apply(date0, 1, function(x) {
   tm <- seq(as.POSIXct(paste0(x[1], "-01-01")), as.POSIXct(paste0(x[1], "-12-31")), by = "day")
   w  <- which(x[2]==as.numeric(format(tm, "%U")))
   mean(tm[w])
 }), origin = "1970-01-01")
 
 files <- data.frame(Path = list.files(dwd, pattern = "SMN.tif$", full.names = T), Year = year, Week = week, Date = date)
-files <- subset(files, Year >= 2004)
+files <- subset(files, Year >= 2008 & Year <= 2020)
 files <- files[order(files$Date),]
 ```
 
@@ -319,19 +320,157 @@ files <- files[order(files$Date),]
 <!-- end list -->
 
 ``` r
-eviM <- do.call("cbind", pbmclapply(1:nrow(files), function(x) { 
-   r0 <- raster(as.character(files[x,1]))
-   raster::extract(r0, snowRaw$crds)
-}, mc.cores = detectCores()-1))
+crds <- rgdal:::project(snowRaw$crds, prj, inv = T)
 
-eviRaw <- list(crds = snow$crds, dates = dates, evi = eviM)
-save(eviRaw, file = "results/eviRaw_4km_2004_2020.RData")
+eviM <- do.call("cbind", pbmcapply:::pbmclapply(1:nrow(files), function(x) { 
+   r0 <- raster(as.character(files[x,1]))
+   raster::extract(r0, crds)
+}, mc.cores = parallel::detectCores()-1))
+
+eviRaw <- list(crds = crds, dates = files$Date, evi = eviM)
+save(eviRaw, file = "results/eviRaw_4km_2008_2020.RData")
 ```
 
-3.  …
+3.  Snow cover and artifact correction: NDVI values below zero
+    (artifacts) will be removed and snow cover data for each NDVI date
+    and pixel will be extracted.
+
+<!-- end list -->
+
+``` r
+## closest snow value for NDVI dates
+snowNDVIindex <- sapply(as.numeric(eviRaw$dates), function(d) which.min(abs(d-as.numeric(as.POSIXct(snowRaw$dates)))))
+
+eviSnow <- abind::abind(parallel::mclapply(1:nrow(eviRaw$evi), function(x) {
+  
+  tmp <- ifelse(eviRaw$evi[x,]<0, NA, eviRaw$evi[x,])
+  
+  snow0 <- ifelse(snowRaw$snow[x,]%in%c(4,165), 4, ifelse(snowRaw$snow[x,]%in%c(3,164), 3, snowRaw$snow[x,]))
+  snow  <- ifelse(snow0%in%c(0,1), 0, ifelse(snow0==2, 0, 1))
+
+  array(c(tmp, snow[snowNDVIindex]), dim = c(1, length(tmp), 2))
+
+}, mc.cores = parallel::detectCores()-1), along = 1)
+```
+
+4.  Calculate distance matrix between cells to allow robust loess fits
+    by including cells of the sourrounding weighted by the distance.
+
+<!-- end list -->
+
+``` r
+### distance matrix
+distM <- geosphere::distm(eviRaw$crds)
+```
+
+5.  Define functions to identify peaks in time series (after Bolton et
+    al. 2020 \[3\]).
+
+<!-- end list -->
+
+``` r
+FindPeaks <- function(x, mag_order = T) {
+  d <- diff(x)
+  d_code <- (d > 0) + (2 * (d < 0))
+  peaks <- unlist(gregexpr("12", paste(d_code, collapse="")))
+  if(peaks[1] == -1) peaks <- NULL
+  flat_peaks <- unlist(gregexpr("10+2", paste(d_code, collapse="")))
+  if(flat_peaks[1] == -1) flat_peaks <- NULL
+  d_code_rle <- rle(d_code)
+  flat_peaks <- flat_peaks + round(d_code_rle$l[match(flat_peaks, cumsum(d_code_rle$l)) + 1] / 2)
+  peaks <- sort(c(peaks + 1, flat_peaks + 1))
+  if(mag_order) return(peaks[order(x[peaks])])
+  return(peaks)
+}
+```
+
+6.  Smooth annual NDVI curve per pixel and extract threshold (15% of
+    increasing curve: from snow melt to max. NDVI).
+
+<!-- end list -->
+
+``` r
+eviPhen <- do.call("rbind", parallel::mclapply(1:nrow(eviRaw$evi), function(x) {
+  
+  pxlInd <- which(distM[x,]<15*1000) ## pxls in 15km sourrounding
+  
+  phenOut <- sapply(2008:2020, function(y) {
+    
+    doy <- as.numeric(format(eviRaw$dates[as.numeric(format(eviRaw$dates, "%Y"))==y], "%j"))
+    tmp <- eviSnow[pxlInd,as.numeric(format(eviRaw$dates, "%Y"))==y,]
+    
+    snowP <- apply(tmp[,,2], 2, function(d) sum(d, na.rm = T)/length(d))
+
+    fitTab <- data.frame(dts = rep(doy, each = dim(tmp)[1]), evi = c(tmp[,,1]), 
+                         snow = rep(snowP, each = dim(tmp)[1]), weight = rep(dnorm(distM[x,pxlInd]/1000, 0, 4), dim(tmp)[2]))
+        
+    spl  <- with(subset(fitTab, !is.na(evi)), smooth.spline(x = dts, y = evi, spar = 0.3, w = weight))
+    xSeq <- seq(min(unique(fitTab$dts[fitTab$snow<0.99])), max(unique(fitTab$dts[fitTab$snow<0.99])))
+    ySeg <- predict(spl, data.frame(dts = xSeq))$y$dts
+        
+    max <- FindPeaks(ySeg, mag_order = F)[1]   
+    amp <- diff(range(ySeg[1:max]))
+    thr <- min(ySeg[1:max])+0.15*amp
+    strt <- tryCatch(curveIntersect(data.frame(x = xSeq, y = ySeg)[1:max,], data.frame(x = xSeq, y = thr))$x, error = function(e) NA)
+      
+      # matplot(doy, t(tmp[,,1]), pch = 16, col = "grey90", type = "p", las = 1)
+      # points(fitTab$dts, fitTab$evi, pch = 16, col = ifelse(fitTab$snow>0.99, "transparent", 
+      #        sapply(fitTab$weight*50, function(c) adjustcolor("forestgreen", alpha.f = c))))
+      # lines(xSeq, ySeg, lwd = 4, col = "orange")
+      # points(strt, thr, pch = 22, cex = 2, bg = "orange", lwd = 2)
+      # par(new = T)
+      # plot(doy, seq(0,1, length = length(doy)), type = "n", xlab = "", ylab = "", yaxt = "n")
+      # points(doy, snowP, pch = 16, col = "blue", type = "o")
+    
+   strt
+  }) 
+  
+}, mc.cores = parallel::detectCores()-1))
+
+evi <- list(crds = crds, eviM = eviPhen)
+save(evi, file = "results/eviPhen_4km.RData")
+```
+
+``` r
+load("results/eviPhen_4km.RData")
+```
+
+<center>
+
+<img src="images/Fig04_EviTrends.png"></img>
+
+<figcaption>
+
+Figure 3: Timing of vegetation greenup in the Alaskan breeding range and
+for the northern (\>64 degrees North) and southern (below 64 degrees
+North).
+
+</figcaption>
+
+</center>
+
+7.  Trend statistics for the entire study period (2008-2020) and the
+    tracking period (2008-2014).
+
+<!-- end list -->
+
+``` r
+knitr::kable(eviStats)
+```
+
+|           | Breeding area                                     | Northern subset                                   | Southern subset                                   |
+| :-------- | :------------------------------------------------ | :------------------------------------------------ | :------------------------------------------------ |
+| 2008-2020 | \-0.944 d/yr ± SE 1e-04; (95% Cl, -0.955, -0.933) | \-0.467 d/yr ± SE 1e-04; (95% Cl, -0.479, -0.456) | \-2.296 d/yr ± SE 3e-04; (95% Cl, -2.32, -2.273)  |
+| 2008-2014 | \-0.088 d/yr ± SE 3e-04; (95% Cl, -0.112, -0.063) | 0.579 d/yr ± SE 3e-04; (95% Cl, 0.555, 0.603)     | \-1.955 d/yr ± SE 6e-04; (95% Cl, -2.012, -1.897) |
 
 ### References
 
 \[1\] IMS Daily Northern Hemisphere Snow and Ice Analysis at 1 km, 4 km,
 and 24 km Resolutions, Version 1. <https://doi.org/10.7265/N52R3PMC>
+
 \[2\] <https://www.star.nesdis.noaa.gov/smcd/emb/vci/VH/vh_ftp.php>
+
+\[3\] Douglas K. Bolton, Josh M. Gray, Eli K. Melaas, Minkyu Moon, Lars
+Eklundh, Mark A. Friedl (2020) Continental-scale land surface phenology
+from harmonized Landsat 8 and Sentinel-2 imagery. Remote Sensing of
+Environment, 240, <https://doi.org/10.1016/j.rse.2020.111685>.
