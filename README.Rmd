@@ -640,6 +640,108 @@ load("results/eviStats.rda")
 knitr::kable(eviStats)
 ```
 
+### Comparison between calcualted green-up date/trends with MODIS MCD12Q2 Land Cover Dynamic values (2008-2018).
+
+```{r}
+library(rgee)
+ee_Initialize()
+
+roi_ee <- ee$Geometry$Rectangle(
+  coords = st_bbox(st_read("data/btg_breedingAK/btg_breedingSiteAK.shp") %>% 
+                     st_set_crs(4326) %>% st_geometry()),
+  proj = "EPSG:4326",
+  geodesic = FALSE
+)
+
+for(y in 2008:2018) {
+  
+MODgup = ee$ImageCollection('MODIS/006/MCD12Q2')$
+  filter(ee$Filter$date(glue::glue('{y}-01-01'), glue::glue('{y}-12-31')))$
+  select(c("Greenup_1", "QA_Overall_1"))
+
+rOut <- ee_as_raster(
+  image = MODgup$median(),
+  region = roi_ee,
+  scale  = 500,
+  via = "getInfo",
+  quiet = TRUE
+)
+
+rOut <- mask(rOut, as(btg, "Spatial"))
+
+if(y==2008) {
+  MOD12gup <- matrix(ifelse(rOut[][,2]<=1 & rOut[][,1]>=0, 
+                      as.numeric(format(as.POSIXct(rOut[][,1]*24*60*60, origin = "1970-01-01"), "%j")), NA), ncol = 1)
+} else {
+  MOD12gup <- cbind(MOD12gup, ifelse(rOut[][,2]<=1 & rOut[][,1]>=0, 
+                      as.numeric(format(as.POSIXct(rOut[][,1]*24*60*60, origin = "1970-01-01"), "%j")), NA))
+}
+
+}
+
+save(MOD12gup, file = "results/MOD12gup.rda")
+
+
+library(nlme)
+library(lmerTest)
+library(lme4)
+library(merTools)
+library(mgcv)
+library(glue)
+
+opar <- par(mar = c(3,3,1,1), mfrow = c(1,3))
+
+rng <- apply(MOD12gup, 2, function(x) quantile(x[x>10], probs = c(0.025, 0.5, 0.975), na.rm = T))
+
+plot(2008:2018, rng[2,], type = "n", ylim = range(rng))
+polygon(c(2008:2018, 2018:2008), c(rng[1,], rev(rng[3,])), col = "grey80", border = NA)
+lines(2008:2018, rng[2,], lwd = 2, type = "o")
+
+tmp <- data.frame(year = rep(2008:2018, each = nrow(MOD12gup)), 
+                        evi = c(MOD12gup),
+                        cell = rep(1:nrow(MOD12gup), length(2008:2018)))
+
+      tmp <- subset(tmp, evi>10 & !is.na(evi) & !is.nan(evi) & !is.infinite(evi))
+      
+      lm <- lmer(evi ~ year + (1|cell), data = tmp[sample(1:nrow(tmp), 25000),], na.action = na.omit)
+      
+      newdat  <- data.frame(year = 2008:2018)
+      mm      <- model.matrix(~year, newdat)
+
+      newdat$y1 <- mm%*%fixef(lm)
+      with(newdat, lines(year, y1, lty = 1, lwd = 2.5, col = "darkgreen"))
+
+
+rng <- apply(MOD12gup[coordinates(rOut)[,2]>64,], 2, function(x) quantile(x, probs = c(0.025, 0.5, 0.975), na.rm = T))
+plot(2008:2018, rng[2,], type = "n", ylim = range(rng))
+polygon(c(2008:2018, 2018:2008), c(rng[1,], rev(rng[3,])), col = "grey80", border = NA)
+lines(2008:2018, rng[2,], lwd = 2, type = "o")
+
+
+tmp <- data.frame(year = rep(2008:2018, each = nrow(MOD12gup)), 
+                        evi = c(MOD12gup),
+                        cell = rep(1:nrow(MOD12gup), length(2008:2018)))
+
+      tmp <- subset(tmp, evi>10 & !is.na(evi) & !is.nan(evi) & !is.infinite(evi))
+      
+      lm <- lmer(evi ~ year + (1|cell), data = tmp[sample(1:nrow(tmp), 25000),], na.action = na.omit)
+      
+      newdat  <- data.frame(year = 2008:2018)
+      mm      <- model.matrix(~year, newdat)
+
+      newdat$y1 <- mm%*%fixef(lm)
+      with(newdat, lines(year, y1, lty = 1, lwd = 2.5, col = "darkgreen"))
+
+rng <- apply(MOD12gup[coordinates(rOut)[,2]<64,], 2, function(x) quantile(x, probs = c(0.025, 0.5, 0.975), na.rm = T))
+plot(2008:2018, rng[2,], type = "n", ylim = range(rng))
+polygon(c(2008:2018, 2018:2008), c(rng[1,], rev(rng[3,])), col = "grey80", border = NA)
+lines(2008:2018, rng[2,], lwd = 2, type = "o")
+
+par(opar)
+```
+
+
+
 
 ### References
 
