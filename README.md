@@ -507,6 +507,7 @@ if(y==2008) {
 
 }
 
+
 MODgup  <- list(crds = coordinates(rOut), mod = MOD12gup)
 save(MODgup, file = "results/MODgup.rda")
 ```
