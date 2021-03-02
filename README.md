@@ -463,6 +463,78 @@ knitr::kable(eviStats)
 | 2008-2020 | \-0.944 d/yr ± SE 1e-04; (95% Cl, -0.955, -0.933) | \-0.467 d/yr ± SE 1e-04; (95% Cl, -0.479, -0.456) | \-2.296 d/yr ± SE 3e-04; (95% Cl, -2.32, -2.273)  |
 | 2008-2014 | \-0.088 d/yr ± SE 3e-04; (95% Cl, -0.112, -0.063) | 0.579 d/yr ± SE 3e-04; (95% Cl, 0.555, 0.603)     | \-1.955 d/yr ± SE 6e-04; (95% Cl, -2.012, -1.897) |
 
+### MODIS MCD12Q2 Land Cover Dynamic greenup trends (2008-2018) in comparison with above calculated greenup trend.
+
+1.  Get MODIS MCD12Q2 Land Cover Dynamic Greenup days for the years 2008
+    to 2018 (and pixel quality estimate).
+
+<!-- end list -->
+
+``` r
+library(rgee)
+ee_Initialize()
+
+roi_ee <- ee$Geometry$Rectangle(
+  coords = st_bbox(st_read("data/btg_breedingAK/btg_breedingSiteAK.shp") %>% 
+                     st_set_crs(4326) %>% st_geometry()),
+  proj = "EPSG:4326",
+  geodesic = FALSE
+)
+
+for(y in 2008:2018) {
+  
+MODgup = ee$ImageCollection('MODIS/006/MCD12Q2')$
+  filter(ee$Filter$date(glue::glue('{y}-01-01'), glue::glue('{y}-12-31')))$
+  select(c("Greenup_1", "QA_Overall_1"))
+
+rOut <- ee_as_raster(
+  image = MODgup$median(),
+  region = roi_ee,
+  scale  = 500,
+  via = "getInfo",
+  quiet = TRUE
+)
+
+rOut <- mask(rOut, as(btg, "Spatial"))
+
+if(y==2008) {
+  MOD12gup <- matrix(ifelse(rOut[][,2]<=1 & rOut[][,1]>=0, 
+                      as.numeric(format(as.POSIXct(rOut[][,1]*24*60*60, origin = "1970-01-01"), "%j")), NA), ncol = 1)
+} else {
+  MOD12gup <- cbind(MOD12gup, ifelse(rOut[][,2]<=1 & rOut[][,1]>=0, 
+                      as.numeric(format(as.POSIXct(rOut[][,1]*24*60*60, origin = "1970-01-01"), "%j")), NA))
+}
+
+}
+
+MODgup  <- list(crds = coordinates(rOut), mod = MOD12gup)
+save(MODgup, file = "results/MODgup.rda")
+```
+
+2.  Trend statistics and comparison.
+
+<center>
+
+<img src="images/Fig05_MOD_STARcomp.png"></img>
+
+<figcaption>
+
+Figure 5: Comparison of trends in MODIS MCD12Q2 Greenup and NOAA STAR
+greenup estimates.
+
+</figcaption>
+
+</center>
+
+``` r
+knitr::kable(statsTab)
+```
+
+|        | Breeding area                                     | Northern subset                                   | Southern subset                                   |
+| :----- | :------------------------------------------------ | :------------------------------------------------ | :------------------------------------------------ |
+| tbMod  | \-1.042 d/yr ± SE 0.001; (95% Cl, -1.203, -0.881) | \-0.684 d/yr ± SE 0.001; (95% Cl, -0.845, -0.524) | \-2.927 d/yr ± SE 0.001; (95% Cl, -3.078, -2.777) |
+| tbSTAR | \-0.702 d/yr ± SE 0.001; (95% Cl, -0.716, -0.687) | \-0.051 d/yr ± SE 0.001; (95% Cl, -0.065, -0.036) | \-2.533 d/yr ± SE 0.001; (95% Cl, -2.563, -2.503) |
+
 ### References
 
 \[1\] IMS Daily Northern Hemisphere Snow and Ice Analysis at 1 km, 4 km,
